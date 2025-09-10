@@ -26,7 +26,8 @@ use std::fmt;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
 
 pub const DEFAULT_API_ENDPOINT: &'static str = "https://sdkms.fortanix.com";
 
@@ -359,31 +360,55 @@ where
     E: Serialize,
     D: for<'de> Deserialize<'de>,
 {
-    let url = format!("{}{}", api_endpoint, path);
-    let encbody;
-    let mut req_builder = client.request(method.clone(), &url);
-    if let Some(auth) = auth {
-        req_builder = req_builder.header(Authorization(auth.format_header()));
-    }
-    if let Some(request_body) = body {
-        req_builder = req_builder.header(ContentType::json());
-        encbody = serde_json::to_string(request_body).map_err(Error::EncoderError)?;
-        req_builder = req_builder.body(encbody.as_bytes())
-    }
-    match req_builder.send() {
-        Err(e) => {
-            info!("Error {} {}", method, url);
-            Err(Error::NetworkError(e))
+    let retry_for = Duration::from_secs(30);
+    let start_time = Instant::now();
+    let mut backoff_delay = Duration::from_millis(10);
+    loop {
+        let url = format!("{}{}", api_endpoint, path);
+        let encbody;
+        let mut req_builder = client.request(method.clone(), &url);
+        if let Some(auth) = auth {
+            req_builder = req_builder.header(Authorization(auth.format_header()));
         }
-        Ok(ref mut res) if res.status.is_success() => {
-            info!("{} {} {}", res.status.to_u16(), method, url);
-            json_decode_reader(res).map_err(|err| Error::EncoderError(err))
+        if let Some(request_body) = body {
+            req_builder = req_builder.header(ContentType::json());
+            encbody = serde_json::to_string(request_body).map_err(Error::EncoderError)?;
+            req_builder = req_builder.body(encbody.as_bytes())
         }
-        Ok(ref mut res) => {
-            info!("{} {} {}", res.status.to_u16(), method, url);
-            let mut buffer = String::new();
-            res.read_to_string(&mut buffer).map_err(|err| Error::IoError(err))?;
-            Err(Error::from_status(res.status, buffer))
+        
+        match req_builder.send() {
+            Err(e) => {
+                // Retry for network related errors
+                if start_time.elapsed() >= retry_for {
+                    info!("Error {} {}", method, url);
+                    return Err(Error::NetworkError(e));
+                }
+                info!("Request failed: {}. Retrying...", e);
+                sleep(backoff_delay);
+                backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+            }
+            Ok(ref mut res) if res.status.is_server_error() => {
+                // Retry for server related errors
+                if start_time.elapsed() >= retry_for {
+                    info!("Error {} {}", method, url);
+                    let mut buffer = String::new();
+                    res.read_to_string(&mut buffer).map_err(Error::IoError)?;
+                    return Err(Error::from_status(res.status, buffer));
+                }
+                info!("Server error: {}. Retrying...", res.status);
+                sleep(backoff_delay);
+                backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
+            }
+            Ok(ref mut res) if res.status.is_success() => {
+                info!("{} {} {}", res.status.to_u16(), method, url);
+                return json_decode_reader(res).map_err(|err| Error::EncoderError(err));
+            }
+            Ok(ref mut res) => {
+                info!("{} {} {}", res.status.to_u16(), method, url);
+                let mut buffer = String::new();
+                res.read_to_string(&mut buffer).map_err(|err| Error::IoError(err))?;
+                return Err(Error::from_status(res.status, buffer));
+            }
         }
     }
 }
