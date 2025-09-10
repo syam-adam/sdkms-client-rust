@@ -363,17 +363,23 @@ where
     let retry_for = Duration::from_secs(30);
     let start_time = Instant::now();
     let mut backoff_delay = Duration::from_millis(10);
+    let url = format!("{}{}", api_endpoint, path);
+
+    let encbody = if let Some(request_body) = body {
+        Some(serde_json::to_string(request_body).map_err(Error::EncoderError)?)
+    } else {
+        None
+    };
+
     loop {
-        let url = format!("{}{}", api_endpoint, path);
-        let encbody;
         let mut req_builder = client.request(method.clone(), &url);
         if let Some(auth) = auth {
             req_builder = req_builder.header(Authorization(auth.format_header()));
         }
-        if let Some(request_body) = body {
+
+        if let Some(enc_body) = encbody.as_ref() {
             req_builder = req_builder.header(ContentType::json());
-            encbody = serde_json::to_string(request_body).map_err(Error::EncoderError)?;
-            req_builder = req_builder.body(encbody.as_bytes())
+            req_builder = req_builder.body(enc_body.as_bytes())
         }
         
         match req_builder.send() {
@@ -383,19 +389,19 @@ where
                     info!("Error {} {}", method, url);
                     return Err(Error::NetworkError(e));
                 }
-                info!("Request failed: {}. Retrying...", e);
+                info!("Request Failed: {}. Retrying...", e);
                 sleep(backoff_delay);
                 backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
             }
             Ok(ref mut res) if res.status.is_server_error() => {
                 // Retry for server related errors
                 if start_time.elapsed() >= retry_for {
-                    info!("Error {} {}", method, url);
+                    info!("Error {} {} {}", res.status.to_u16(), method, url);
                     let mut buffer = String::new();
                     res.read_to_string(&mut buffer).map_err(Error::IoError)?;
                     return Err(Error::from_status(res.status, buffer));
                 }
-                info!("Server error: {}. Retrying...", res.status);
+                info!("Server Error {} {} {}. Retrying...", res.status.to_u16(), method, url);
                 sleep(backoff_delay);
                 backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(5));
             }
