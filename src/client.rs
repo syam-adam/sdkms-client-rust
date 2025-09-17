@@ -26,7 +26,8 @@ use std::fmt;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
 
 pub const DEFAULT_API_ENDPOINT: &'static str = "https://sdkms.fortanix.com";
 
@@ -358,32 +359,71 @@ fn json_request_with_auth<E, D>(
 where
     E: Serialize,
     D: for<'de> Deserialize<'de>,
-{
+{   
+    const INITIAL_BACKOFF_MS: u64 = 10;
+    const MAX_BACKOFF_SECS: u64 = 5; 
+    const MAX_RETRIES: u64 = 10;
+
+    let mut backoff_delay = Duration::from_millis(INITIAL_BACKOFF_MS);
     let url = format!("{}{}", api_endpoint, path);
-    let encbody;
-    let mut req_builder = client.request(method.clone(), &url);
-    if let Some(auth) = auth {
-        req_builder = req_builder.header(Authorization(auth.format_header()));
-    }
-    if let Some(request_body) = body {
-        req_builder = req_builder.header(ContentType::json());
-        encbody = serde_json::to_string(request_body).map_err(Error::EncoderError)?;
-        req_builder = req_builder.body(encbody.as_bytes())
-    }
-    match req_builder.send() {
-        Err(e) => {
-            info!("Error {} {}", method, url);
-            Err(Error::NetworkError(e))
+
+    let encbody = if let Some(request_body) = body {
+        Some(serde_json::to_string(request_body).map_err(Error::EncoderError)?)
+    } else {
+        None
+    };
+
+    // store last result 
+    let mut result = None;
+
+    for attempt in 0..MAX_RETRIES {
+        let mut req_builder = client.request(method.clone(), &url);
+        if let Some(auth) = auth {
+            req_builder = req_builder.header(Authorization(auth.format_header()));
         }
-        Ok(ref mut res) if res.status.is_success() => {
-            info!("{} {} {}", res.status.to_u16(), method, url);
-            json_decode_reader(res).map_err(|err| Error::EncoderError(err))
+
+        if let Some(enc_body) = encbody.as_ref() {
+            req_builder = req_builder.header(ContentType::json());
+            req_builder = req_builder.body(enc_body.as_bytes())
         }
-        Ok(ref mut res) => {
-            info!("{} {} {}", res.status.to_u16(), method, url);
-            let mut buffer = String::new();
-            res.read_to_string(&mut buffer).map_err(|err| Error::IoError(err))?;
-            Err(Error::from_status(res.status, buffer))
+        
+        match req_builder.send() {
+            Err(e) => {
+                // Retry for network related errors
+                info!("Request Failed: {}. Retrying...", e);
+                result = Some(Error::NetworkError(e));
+            }
+            Ok(ref mut res) if res.status.is_success() => {
+                info!("{} {} {}", res.status.to_u16(), method, url);
+                return json_decode_reader(res).map_err(|err| Error::EncoderError(err));
+            }
+            Ok(ref mut res) => {
+                let mut buffer = String::new();
+                if let Err(err) = res.read_to_string(&mut buffer) {
+                    // Retry for I/O related errors
+                    result = Some(Error::IoError(err));
+                    continue;
+                };
+                
+                if res.status.is_server_error() {
+                    // Retry for server related errors
+                    info!("Server Error {} {} {}. Retrying...", res.status.to_u16(), method, url);
+                    result = Some(Error::from_status(res.status, buffer));
+                    continue;
+                }
+
+                info!("{} {} {}", res.status.to_u16(), method, url);
+                // Return back other errors without retry
+                return Err(Error::from_status(res.status, buffer));
+            }
+        }
+        // only sleep if not the last attempt
+        if attempt < MAX_RETRIES - 1 {
+            sleep(backoff_delay);
+            backoff_delay = std::cmp::min(backoff_delay * 2, Duration::from_secs(MAX_BACKOFF_SECS));
         }
     }
+
+    // after retries, return result
+    Err(result.unwrap())
 }
