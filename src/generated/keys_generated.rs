@@ -139,6 +139,33 @@ pub struct ListSobjectsParams {
     pub show_deleted: bool,
     pub show_value: bool,
     pub show_pub_key: bool,
+    /// Allows filtering Sobjects based on various attributes, including kid, key_size, and more.
+    /// The support portal section [2.8.1 Filtering Security Objects Using DSM REST API](https://support.fortanix.com/docs/users-guide-fortanix-data-security-manager-key-lifecycle-management#281-filtering-security-objects-using-dsm-rest-api) explains how to
+    /// compose various queries using the supported filter operations.
+    ///
+    /// The following examples illustrate how to apply these filters when listing security objects:
+    /// - `filter: {"kid":{"$text":{"$search":"1e70c17a-78c3-4fd9-83f5-dbea8641147a"}}}`
+    /// - `filter: {"name":{"$text":{"$search":"13F977EE2B857998"}}}`
+    /// - `filter: {"state":{"$eq":"Deactivated"}}`
+    /// - `filter: {"key_ops":{"$any":{"$or":[{"$eq":"ENCRYPT"},{"$eq":"DECRYPT"},{"$eq":"WRAPKEY"},{"$eq":"UNWRAPKEY"}]}}}`
+    /// - `filter: {"group_name":{"$text":{"$search":"Test_Group"}}}`
+    /// - `filter: {"creator_name":{"$text":{"$search":"key creator"}}}`
+    /// - `filter: {"$and":[{"creator_type":{"$in":["App","User","Plugin"]}},{"obj_type":{"$eq":"RSA"}}, {"enabled":{"$eq":"false"}}]}`
+    /// - `filter: {"$and":[{"key_size":{"$gte":256}},{"obj_type":{"$eq":"AES"}}]}`
+    /// - `filter: {"custom_attributes.custom":{"$text":{"$search":"1"}}}`
+    /// - `filter: {"created_at":{"$lt":1739794080}}`
+    /// - `filter: {"key_ops":{"$all":{"$ne":"HIGHVOLUME"}}}`
+    /// - `filter: {"description":{"$text":{"$search":"BIPS32"}}}`
+    /// - `filter: {"$and": [{"expires":{"$lt":1739794200}},{"expires":{"$gte":1741001700}},{"obj_type":{"$nin":["OPAQUE","SECRET"]}},{"creator_type":{"$eq":"App"}}]}`
+    /// - `filter: {"$and":[{"obj_type":{"$eq":"AES"}},{"obj_type":{"$nin":["DES3","HMAC"]}},{"expires":{"$lt":1739794200}},{"state":{"$nin":["Compromise","Destroyed"]}}]}`
+    /// - `filter: {"$and": [{"key_size": 256}, {"state":{"$eq":"Deactivated"}}, {"name":{"$text":{"$search":"13F977EE2B857998"}}}]`
+    /// - `filter: {"$and":[{"obj_type":{"$in":["AES","DES3"]}},{"creator_type":{"$eq":"User"}}, {"state":{"$ne":"Compromised"}}, {"creator_id":{"$text":{"$search":"542c9eeb-333c-4b30-b0c6-b73260866cfb"}}}]}`
+    /// - `filter: {"wrapping_key":{"$text":{"$search":"3acc3178-b1df-42e9-83c1-0c667119a132"}}}`
+    /// - `filter: {"group_id":{"$text":{"$search":"fde289c5-55bd-48d5-b9b9-2fb2dc14388f"}}}`
+    /// - `filter: {"creator_id":{"$text":{"$search":"542c9eeb-333c-4b30-b0c6-b73260866cfb"}}}`
+    /// - `filter: {"enabled":{"$eq":"true"}}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>
 }
 
 impl UrlEncode for ListSobjectsParams {
@@ -169,6 +196,9 @@ impl UrlEncode for ListSobjectsParams {
         m.insert("show_deleted", self.show_deleted.to_string());
         m.insert("show_value", self.show_value.to_string());
         m.insert("show_pub_key", self.show_pub_key.to_string());
+        if let Some(ref v) = self.filter {
+            m.insert("filter", v.to_string());
+        }
     }
 }
 
